@@ -1,0 +1,249 @@
+diff --git a/drivers/hv/dxgkrnl/dxgkrnl.h b/drivers/hv/dxgkrnl/dxgkrnl.h
+index 8a5f62474..6ed745a31 100644
+--- a/drivers/hv/dxgkrnl/dxgkrnl.h
++++ b/drivers/hv/dxgkrnl/dxgkrnl.h
+@@ -954,5 +954,11 @@ int dxgvmb_send_query_statistics(struct dxgprocess *process,
+ 				 struct d3dkmt_querystatistics *args);
+ int dxgvmb_send_share_object_with_host(struct dxgprocess *process,
+ 				struct d3dkmt_shareobjectwithhost *args);
++int dxgvmb_send_query_statistics(struct dxgprocess *process,
++				 struct dxgadapter *adapter,
++				 struct d3dkmt_querystatistics *args);
++int dxgvmb_fuzz_send_raw_msg(struct dxgadapter *adapter,
++					struct dxgprocess *process,
++					struct d3dkmt_fuzzsendrawmsg *args);
+ 
+ #endif
+diff --git a/drivers/hv/dxgkrnl/dxgvmbus.c b/drivers/hv/dxgkrnl/dxgvmbus.c
+index 3752ff4e7..8ae6ba3e8 100644
+--- a/drivers/hv/dxgkrnl/dxgvmbus.c
++++ b/drivers/hv/dxgkrnl/dxgvmbus.c
+@@ -3779,3 +3779,45 @@ int dxgvmb_send_query_statistics(struct dxgprocess *process,
+ 		dev_dbg(dxgglobaldev, "err: %s %d", __func__, ret);
+ 	return ret;
+ }
++
++int dxgvmb_fuzz_send_raw_msg(struct dxgadapter *adapter,
++					struct dxgprocess *process,
++					struct d3dkmt_fuzzsendrawmsg *args)
++{
++	int ret;
++	struct dxgvmbusmsg msg;
++
++	ret = init_message(&msg, adapter, process, args->size);
++	if (ret) {
++		pr_err("%s failed to init message", __func__);
++		goto cleanup;
++	}
++	if (args->raw_address) {
++		//not yet. need to call vmbus_sendpacket directly
++	}
++	else {
++		size_t copysize = args->size;
++		struct dxgkvmb_command_vm_to_host *cmd_vm_to_host = msg.msg;
++		struct dxgkvmb_command_vgpu_to_host *cmd_vgpu_to_host = msg.msg;
++		if (copysize > sizeof(args->buffer)) {
++			copysize = sizeof(args->buffer);
++		}
++		memcpy((void*)msg.msg, args->buffer, copysize);
++
++		/* If we're not fuzzing the command pointer itself but msg contents,
++		 * provision a valid process handle to ensure commands are not discarded
++		 */
++		if (cmd_vm_to_host->channel_type == DXGKVMB_VM_TO_HOST) {
++			cmd_vm_to_host->process = process->host_handle;
++		}
++		else if (cmd_vgpu_to_host->channel_type == DXGKVMB_VGPU_TO_HOST) {
++			cmd_vgpu_to_host->process = process->host_handle;
++		}
++	}
++
++	ret = dxgvmb_send_sync_msg(msg.channel, msg.hdr, msg.size,
++				   args->out_buffer, sizeof(args->out_buffer));
++	free_message(&msg, process);
++cleanup:
++	return ret;
++}
+\ No newline at end of file
+diff --git a/drivers/hv/dxgkrnl/ioctl.c b/drivers/hv/dxgkrnl/ioctl.c
+index 9236b6b95..a9d6dcc25 100644
+--- a/drivers/hv/dxgkrnl/ioctl.c
++++ b/drivers/hv/dxgkrnl/ioctl.c
+@@ -5311,6 +5311,57 @@ long dxgk_unlocked_ioctl(struct file *f, unsigned int p1, unsigned long p2)
+ 	return dxgk_ioctl(f, p1, p2);
+ }
+ 
++static int
++dxgk_fuzz_send_raw_msg(struct dxgprocess *process, void *__user inargs)
++{
++	int ret;
++	struct d3dkmt_fuzzsendrawmsg args;
++	struct dxgadapter *adapter = NULL;
++
++	ret = copy_from_user(&args, inargs, sizeof(args));
++	if (ret) {
++		pr_err("%s failed to copy input args", __func__);
++		ret = -EINVAL;
++		goto cleanup;
++	}
++
++	adapter = dxgprocess_adapter_by_handle(process, args.adapter);
++	if (adapter == NULL) {
++		pr_err("%s failed to look up adapter", __func__);
++		ret = -EINVAL;
++		goto cleanup;
++	}
++
++	ret = dxgadapter_acquire_lock_shared(adapter);
++	if (ret < 0) {
++		kref_put(&adapter->adapter_kref, dxgadapter_release);
++		adapter = NULL;
++		goto cleanup;
++	}
++
++	args.adapter = adapter->host_handle;
++	ret = dxgvmb_fuzz_send_raw_msg(adapter, process, &args);
++	if (ret) {
++		goto cleanup;
++	}
++	
++	ret = copy_to_user(inargs, &args, sizeof(args));
++	if (ret) {
++		pr_err("%s failed to copy output args", __func__);
++		ret = -EINVAL;
++		goto cleanup;
++	}
++
++cleanup:
++
++	if (adapter) {
++		dxgadapter_release_lock_shared(adapter);
++		kref_put(&adapter->adapter_kref, dxgadapter_release);
++	}
++
++	return ret;
++}
++
+ #define SET_IOCTL(callback, v)				\
+ 	ioctls[_IOC_NR(v)].ioctl_callback = callback;	\
+ 	ioctls[_IOC_NR(v)].ioctl = v
+@@ -5455,4 +5506,6 @@ void init_ioctls(void)
+ 		  LX_DXSHAREOBJECTWITHHOST);
+ 	SET_IOCTL(/*0x45 */ dxgk_create_sync_file,
+ 		  LX_DXCREATESYNCFILE);
++	SET_IOCTL(/*0x46 */ dxgk_fuzz_send_raw_msg,
++		  LX_DXFUZZSENDRAWMSG);
+ }
+diff --git a/drivers/hv/ring_buffer.c b/drivers/hv/ring_buffer.c
+index 356e22159..f5955576a 100644
+--- a/drivers/hv/ring_buffer.c
++++ b/drivers/hv/ring_buffer.c
+@@ -17,9 +17,19 @@
+ #include <linux/vmalloc.h>
+ #include <linux/slab.h>
+ #include <linux/prefetch.h>
++#include <linux/debugfs.h>
++#include <linux/random.h>
+ 
+ #include "hyperv_vmbus.h"
+ 
++enum FUZZ_TEST_MODE {
++	FUZZ_TEST_DISABLED,
++	FUZZ_TEST_CORRUPT_EACH_BYTE,
++	FUZZ_TEST_CORRUPT_RANDOM_BYTE,
++	//other - corrupt ring buffer pointer
++};
++static uint64_t gDoFuzzTest = 0;
++
+ #define VMBUS_PKT_TRAILER	8
+ 
+ /*
+@@ -81,6 +91,9 @@ static inline void
+ hv_set_next_write_location(struct hv_ring_buffer_info *ring_info,
+ 		     u32 next_write_location)
+ {
++	if (gDoFuzzTest > FUZZ_TEST_CORRUPT_RANDOM_BYTE) {
++		next_write_location = (u32)gDoFuzzTest;
++	}
+ 	ring_info->ring_buffer->write_index = next_write_location;
+ }
+ 
+@@ -119,8 +132,15 @@ static u32 hv_copyto_ringbuffer(
+ {
+ 	void *ring_buffer = hv_get_ring_buffer(ring_info);
+ 	u32 ring_buffer_size = hv_get_ring_buffersize(ring_info);
++	u32 random_idx = 0;
+ 
+ 	memcpy(ring_buffer + start_write_offset, src, srclen);
++	if (gDoFuzzTest == FUZZ_TEST_CORRUPT_RANDOM_BYTE && srclen) {
++		get_random_bytes(&random_idx, sizeof(random_idx));
++		random_idx %= srclen;
++		printk("%s: corrupting RB at index %08x\n", __func__, random_idx);
++		((u8*)ring_buffer)[random_idx] ^= 0x5;
++	}
+ 
+ 	start_write_offset += srclen;
+ 	if (start_write_offset >= ring_buffer_size)
+@@ -548,3 +568,31 @@ void hv_pkt_iter_close(struct vmbus_channel *channel)
+ 	vmbus_setevent(channel);
+ }
+ EXPORT_SYMBOL_GPL(hv_pkt_iter_close);
++
++
++/* LOGIC FOR FUZZ-TESTIGN HOST RB CODE
++ * based on the example DebugFS code from https://www.zachpfeffer.com/single-post/a-quick-debugfs-example
++ */
++static int debugfs_u64_set(void *data, u64 val)
++{
++	gDoFuzzTest = val;
++	return 0;
++}
++static int debugfs_u64_get(void *data, u64 *val)
++{
++	*val = gDoFuzzTest;
++	return 0;
++}
++DEFINE_SIMPLE_ATTRIBUTE(fops_u64, debugfs_u64_get, debugfs_u64_set, "%llu\n");
++
++int hv_fuzz_init(void)
++{
++	struct dentry *d, *n;
++	d = debugfs_create_dir("hv_fuzz_ringbuffer", NULL);
++	if (!d)
++		return -ENOMEM;
++
++	n = debugfs_create_file("fuzz_value", 0644, d, 0, &fops_u64);
++	return n != NULL;
++}
++late_initcall(hv_fuzz_init);
+\ No newline at end of file
+diff --git a/include/uapi/misc/d3dkmthk.h b/include/uapi/misc/d3dkmthk.h
+index a32431e3d..d31334d46 100644
+--- a/include/uapi/misc/d3dkmthk.h
++++ b/include/uapi/misc/d3dkmthk.h
+@@ -1805,6 +1805,14 @@ struct d3dkmt_createsyncfile {
+ 	__u64			sync_file_handle;	/* out */
+ };
+ 
++struct d3dkmt_fuzzsendrawmsg {
++	struct d3dkmthandle	adapter;
++	__u64			raw_address; /* will be passed as is instead of buffer if not zero */
++	__u64			size;
++	__u8            buffer[128];
++	__u8            out_buffer[128];
++};
++
+ /*
+  * Dxgkrnl Graphics Port Driver ioctl definitions
+  *
+@@ -1948,7 +1956,9 @@ struct d3dkmt_createsyncfile {
+ 	_IOWR(0x47, 0x44, struct d3dkmt_shareobjectwithhost)
+ #define LX_DXCREATESYNCFILE	\
+ 	_IOWR(0x47, 0x45, struct d3dkmt_createsyncfile)
++#define LX_DXFUZZSENDRAWMSG	\
++	_IOWR(0x47, 0x46, struct d3dkmt_fuzzsendrawmsg)
+ 
+-#define LX_IO_MAX 0x45
++#define LX_IO_MAX 0x46
+ 
+ #endif /* _D3DKMTHK_H */
