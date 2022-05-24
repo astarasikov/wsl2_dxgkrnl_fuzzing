@@ -45,9 +45,33 @@ typedef uint16_t __u16;
 typedef uint32_t __u32;
 typedef uint64_t __u64;
 #include "/home/alex/Documents/builds/linux/WSL2-Linux-Kernel/include/uapi/misc/d3dkmthk.h"
+
+#define MAX_STORED_SIZE 512
+static struct saved_request {
+    unsigned request;
+    unsigned size;
+    unsigned char buffer[MAX_STORED_SIZE];
+} saved_requests[LX_IO_MAX + 1] = {
+};
+
 static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
 {
 	unsigned type = _IOC_TYPE(request);
-	fprintf(stderr, "%s: type=%08x\n", __func__, type);
+	unsigned nr = _IOC_NR(request);
+    unsigned size = _IOC_SIZE(request);
+	fprintf(stderr, "%s: type=%08x nr=%08x size=%08x\n",
+        __func__, type, nr, size);
+
+    if (nr <= LX_IO_MAX && size <= MAX_STORED_SIZE) {
+        saved_requests[nr].request = request;
+        memcpy(saved_requests[nr].buffer, data, size);
+    }
+    
+    //let the app initialize the rendering subsystem first
+    static unsigned count = 0;
+    if (count++ < 30) {
+        return -1;
+    }
+
 	return -1;
 }
