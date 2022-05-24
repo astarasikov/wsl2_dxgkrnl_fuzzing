@@ -8,12 +8,15 @@
 static int (*real_ioctl)(int fd, unsigned request, void *data);
 static int (*real_open)(const char *filename, int flags, ...);
 
+//forward declaration
+static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data);
 static int g_dxg_fd = -1;
 
 int ioctl(int fd, unsigned request, void *data)
 {
 	fprintf(stderr, "%s: fd=%d request=%08x data=%p\n",
 			__func__, fd, request, data);
+	dxgk_fuzzer_ioctl(fd, request, data);
 	return real_ioctl(fd, request, data);
 }
 
@@ -31,4 +34,20 @@ int open(const char *filename, int flags, ...) {
 		g_dxg_fd = ret;
 	}
 	return ret;
+}
+
+//DXGK-specific code
+#include <stdint.h>
+#include <stdbool.h>
+#include <linux/ioctl.h>
+typedef uint8_t __u8;
+typedef uint16_t __u16;
+typedef uint32_t __u32;
+typedef uint64_t __u64;
+#include "/home/alex/Documents/builds/linux/WSL2-Linux-Kernel/include/uapi/misc/d3dkmthk.h"
+static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
+{
+	unsigned type = _IOC_TYPE(request);
+	fprintf(stderr, "%s: type=%08x\n", __func__, type);
+	return -1;
 }
