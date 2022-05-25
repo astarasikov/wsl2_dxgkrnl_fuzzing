@@ -172,7 +172,7 @@ static uint32_t cool_word(void)
 
 static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
 {
-    for (size_t fuzz_attempt = 0; fuzz_attempt < 4; fuzz_attempt++)
+    for (size_t fuzz_attempt = 0; fuzz_attempt < 10; fuzz_attempt++)
     {
         unsigned new_nr = 0;
         while (1) {
@@ -213,7 +213,7 @@ static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
             new_size = saved_requests[new_nr].size;
             memcpy(buf, saved_requests[new_nr].buffer, new_size);
         }
-        fprintf(stderr, "%s:%d: new_nr=%08x new_size=%08zx\n", __func__, __LINE__, new_nr, new_size);
+        //fprintf(stderr, "%s:%d: new_nr=%08x new_size=%08zx\n", __func__, __LINE__, new_nr, new_size);
         
         //TODO: for now, just replay already seen ioctls
         //now that we have corrupted shared memory
@@ -277,6 +277,28 @@ static void add_mem_record_u64(size_t addr, size_t size)
     add_mem_record((void*)addr, size);
 }
 
+static void corrupt_some_mem(void)
+{
+    size_t i = ARRAY_SIZE(known_mem) - 1;
+    size_t entry_to_corrupt = 0;
+    while (i > 0) {
+        if (known_mem[i].ptr) {
+            break;
+        }
+        i--;
+    }
+    if (i) {
+        entry_to_corrupt = rand() % i;
+    }
+
+    void *ptr = known_mem[entry_to_corrupt].ptr;
+    size_t size = known_mem[entry_to_corrupt].size;
+    if (!ptr || !size) {
+        return;
+    }
+    ((unsigned char*)ptr)[rand() % size] ^= 5;
+}
+
 static void dxgk_fuzzer_known_mem(int fd, unsigned request, void *data)
 {
     switch (request) {
@@ -335,7 +357,8 @@ static int dxgk_fuzzer_ioctl(int fd, unsigned request, void *data)
         return -1;
     }
     dxgk_fuzzer_known_mem(fd, request, data);
-    dxgk_fuzzer_mutate_ioctls(fd, request, data);
+    corrupt_some_mem();
+    //dxgk_fuzzer_mutate_ioctls(fd, request, data);
 
 	return -1;
 }
