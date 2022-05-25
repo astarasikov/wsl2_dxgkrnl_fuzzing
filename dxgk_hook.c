@@ -152,28 +152,8 @@ static uint32_t cool_word(void)
     return rand() % 64;
 }
 
-static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
+static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
 {
-	unsigned type = _IOC_TYPE(request);
-	unsigned nr = _IOC_NR(request);
-    unsigned size = _IOC_SIZE(request);
-	//fprintf(stderr, "%s: type=%08x nr=%08x size=%08x\n", __func__, type, nr, size);
-
-    if (nr <= LX_IO_MAX && size <= MAX_STORED_SIZE) {
-        saved_requests[nr].request = request;
-        saved_requests[nr].size = size;
-        memcpy(saved_requests[nr].buffer, data, size);
-    }
-    
-    //let the app initialize the rendering subsystem first
-    static unsigned count = 0;
-    if (count) {
-        srand(time(NULL));
-    }
-    if (count++ < 100) {
-        return -1;
-    }
-
     for (size_t fuzz_attempt = 0; fuzz_attempt < 20; fuzz_attempt++)
     {
         unsigned new_nr = 0;
@@ -222,18 +202,45 @@ static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
         if (!size_in_u4) {
             continue;
         }
-        for (size_t num_corrupt = 0; num_corrupt < 1; num_corrupt++)
+        for (size_t num_corrupt = 0; num_corrupt < 10; num_corrupt++)
         {
             size_t idx_corrupt = rand() % size_in_u4;
             if (idx_corrupt >= size_in_u4) {
                 fprintf(stderr, "HMM\n");
                 idx_corrupt = size_in_u4 - 1;
             }
-            ((uint32_t*)buf)[idx_corrupt] ^= 0x5 << (rand() % 31);
+            if (((uint32_t*)buf)[idx_corrupt]) {
+                ((uint32_t*)buf)[idx_corrupt] ^= 0x5 << (rand() % 31);
+            }
         }
 
         ioctl(arg, new_request, buf);
     }
+}
+
+static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
+{
+	unsigned type = _IOC_TYPE(request);
+	unsigned nr = _IOC_NR(request);
+    unsigned size = _IOC_SIZE(request);
+	//fprintf(stderr, "%s: type=%08x nr=%08x size=%08x\n", __func__, type, nr, size);
+
+    if (nr <= LX_IO_MAX && size <= MAX_STORED_SIZE) {
+        saved_requests[nr].request = request;
+        saved_requests[nr].size = size;
+        memcpy(saved_requests[nr].buffer, data, size);
+    }
+    
+    //let the app initialize the rendering subsystem first
+    static unsigned count = 0;
+    if (count) {
+        srand(time(NULL));
+    }
+    if (count++ < 100) {
+        return -1;
+    }
+    dxgk_fuzzer_mutate_ioctls(arg, request, data);
+
 
 	return -1;
 }
