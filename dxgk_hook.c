@@ -7,10 +7,21 @@
 
 static int (*real_ioctl)(int fd, unsigned request, void *data);
 static int (*real_open)(const char *filename, int flags, ...);
+static void* (*real_mmap)(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 
 //forward declaration
 static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data);
 static int g_dxg_fd = -1;
+
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+    void *ret = NULL;
+    fprintf(stderr, "%s: addr=%p length=%08zx prot=%08x flags=%08x, fd=%08x, offset=%08zx\n",
+        __func__, addr, length, prot, flags, fd, offset);
+
+    ret = real_mmap(addr, length, prot, flags, fd, offset);
+    return ret;
+}
 
 int ioctl(int fd, unsigned request, void *data)
 {
@@ -30,6 +41,9 @@ int open(const char *filename, int flags, ...) {
 	if (!real_ioctl) {
 		real_ioctl = dlsym(RTLD_NEXT, "ioctl");
 	}
+    if (!real_mmap) {
+        real_mmap = dlsym(RTLD_NEXT, "mmap");
+    }
 	ret = real_open(filename, flags);
 	if (!strcmp(filename, "/dev/dxg")) {
 		g_dxg_fd = ret;
@@ -239,8 +253,7 @@ static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
     if (count++ < 100) {
         return -1;
     }
-    dxgk_fuzzer_mutate_ioctls(arg, request, data);
-
+    //dxgk_fuzzer_mutate_ioctls(arg, request, data);
 
 	return -1;
 }
