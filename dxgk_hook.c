@@ -11,6 +11,7 @@ static void* (*real_mmap)(void *addr, size_t length, int prot, int flags, int fd
 
 //forward declaration
 static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data);
+static void *dxgk_mmap_hook(void *addr, size_t length, int prot, int flags, int fd, off_t offset, void *ret);
 static int g_dxg_fd = -1;
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
@@ -20,6 +21,9 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
         __func__, addr, length, prot, flags, fd, offset);
 
     ret = real_mmap(addr, length, prot, flags, fd, offset);
+    //unfortunately, D3D12 drivers map a huge area and use a custom allocator
+    //so we'll have to instead steal valid addresses from IOCTL arguments
+    //dxgk_mmap_hook(addr, length, prot, flags, fd, offset, ret);
     return ret;
 }
 
@@ -168,7 +172,7 @@ static uint32_t cool_word(void)
 
 static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
 {
-    for (size_t fuzz_attempt = 0; fuzz_attempt < 20; fuzz_attempt++)
+    for (size_t fuzz_attempt = 0; fuzz_attempt < 4; fuzz_attempt++)
     {
         unsigned new_nr = 0;
         while (1) {
@@ -190,9 +194,8 @@ static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
         unsigned new_request = saved_requests[new_nr].request;
         size_t new_size = MAX_STORED_SIZE;
         if (!new_request) {
-            continue;
             //fprintf(stderr, "%s:%d: saved request NOT found for new_nr=%08x\n", __func__, __LINE__, new_nr);
-            //continue;
+            continue;
             new_size = _IOC_SIZE(dxgk_all_ioctls[new_nr]);
             if (new_size > MAX_STORED_SIZE) {
                 fprintf(stderr, "%s:%d: new_size=%08zx > %08x\n",
@@ -210,12 +213,16 @@ static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
             new_size = saved_requests[new_nr].size;
             memcpy(buf, saved_requests[new_nr].buffer, new_size);
         }
-        //fprintf(stderr, "%s:%d: new_nr=%08x new_size=%08zx\n", __func__, __LINE__, new_nr, new_size);
+        fprintf(stderr, "%s:%d: new_nr=%08x new_size=%08zx\n", __func__, __LINE__, new_nr, new_size);
         
+        //TODO: for now, just replay already seen ioctls
+        //now that we have corrupted shared memory
+        #if 0
         size_t size_in_u4 = new_size / sizeof(uint32_t);
         if (!size_in_u4) {
             continue;
         }
+
         for (size_t num_corrupt = 0; num_corrupt < 10; num_corrupt++)
         {
             size_t idx_corrupt = rand() % size_in_u4;
@@ -227,12 +234,86 @@ static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
                 ((uint32_t*)buf)[idx_corrupt] ^= 0x5 << (rand() % 31);
             }
         }
+        #endif
 
         ioctl(arg, new_request, buf);
     }
 }
 
-static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
+#define MAX_KNOWN_MEM_RECORDS 128
+static struct known_mem_record {
+    void *ptr;
+    size_t size;
+} known_mem[MAX_KNOWN_MEM_RECORDS] = {
+};
+
+static void add_mem_record(void *ptr, size_t size)
+{
+    if (!ptr || !size) {
+        return;
+    }
+    fprintf(stderr, "%s:%d ptr=%p size=%08zx\n",
+        __func__, __LINE__, ptr, size);
+    for (size_t i = 0; i < ARRAY_SIZE(known_mem); i++)
+    {
+        if (known_mem[i].ptr == ptr) {
+            return;
+        }
+        if (!known_mem[i].ptr) {
+            known_mem[i].ptr = ptr;
+            known_mem[i].size = size;
+            return;
+        }
+    }
+    fprintf(stderr, "%s:%d: mem table full, replacing random entry\n",
+        __func__, __LINE__);
+    size_t idx = rand() % ARRAY_SIZE(known_mem);
+    known_mem[idx].ptr = ptr;
+    known_mem[idx].size = size;
+}
+
+static void add_mem_record_u64(size_t addr, size_t size)
+{
+    add_mem_record((void*)addr, size);
+}
+
+static void dxgk_fuzzer_known_mem(int fd, unsigned request, void *data)
+{
+    switch (request) {
+        case LX_DXCREATEDEVICE:
+        {
+            struct d3dkmt_createdevice *arg = data;
+            add_mem_record_u64(arg->command_buffer, arg->command_buffer_size);
+            add_mem_record_u64(arg->allocation_list, arg->allocation_list_size);
+            add_mem_record_u64(arg->patch_location_list, arg->patch_location_list_size);
+        }
+        case LX_DXCREATECONTEXT:
+        {
+            struct d3dkmt_createcontext *arg = data;
+            add_mem_record_u64(arg->priv_drv_data, arg->priv_drv_data_size);
+            add_mem_record_u64(arg->command_buffer, arg->command_buffer_size);
+            add_mem_record_u64(arg->allocation_list, arg->allocation_list_size);
+            add_mem_record_u64(arg->patch_location_list, arg->patch_location_list_size);
+        }
+        case LX_DXCREATECONTEXTVIRTUAL:
+        {
+            struct d3dkmt_createcontextvirtual *arg = data;
+            add_mem_record_u64(arg->priv_drv_data, arg->priv_drv_data_size);
+        }
+        case LX_DXRENDER:
+        {
+            struct d3dkmt_render *arg = data;
+            add_mem_record_u64(arg->priv_drv_data, arg->priv_drv_data_size);
+            add_mem_record_u64(arg->new_command_buffer, arg->new_command_buffer_size);
+            add_mem_record_u64(arg->new_allocation_list, arg->new_allocation_list_size);
+            add_mem_record_u64(arg->new_patch_pocation_list, arg->new_patch_pocation_list_size);
+        }
+        default:
+            break;
+    }
+}
+
+static int dxgk_fuzzer_ioctl(int fd, unsigned request, void *data)
 {
 	unsigned type = _IOC_TYPE(request);
 	unsigned nr = _IOC_NR(request);
@@ -253,7 +334,33 @@ static int dxgk_fuzzer_ioctl(int arg, unsigned request, void *data)
     if (count++ < 100) {
         return -1;
     }
-    //dxgk_fuzzer_mutate_ioctls(arg, request, data);
+    dxgk_fuzzer_known_mem(fd, request, data);
+    dxgk_fuzzer_mutate_ioctls(fd, request, data);
 
 	return -1;
+}
+
+static void *dxgk_mmap_hook(void *addr, size_t length, int prot, int flags,
+    int fd, off_t offset, void *ret)
+{
+    if (!g_dxg_fd) {
+        return ret;
+    }
+    if ((!ret) || ((size_t)ret) == (size_t)-1) {
+        return ret;
+    }
+    switch (length) {
+        default:
+            return ret;
+    }
+
+    fprintf(stderr, "%s: corrupting ret=%p length=%08zx\n",
+        __func__, ret, length);
+    for (size_t i = 0; i < 10; i++)
+    {
+        size_t idx_corr = rand() % length;
+        idx_corr /= sizeof(uint32_t);
+        ((uint32_t*)ret)[idx_corr] ^= 0x5 << (rand() % 31);
+    }
+    return ret;
 }
