@@ -200,13 +200,11 @@ static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
         static unsigned char buf[MAX_STORED_SIZE] = {};
         unsigned new_request = saved_requests[new_nr].request;
         size_t new_size = MAX_STORED_SIZE;
+        #if 0
         if (!new_request) {
             //fprintf(stderr, "%s:%d: saved request NOT found for new_nr=%08x\n", __func__, __LINE__, new_nr);
-            continue;
             new_size = _IOC_SIZE(dxgk_all_ioctls[new_nr].ioc);
             if (new_size > MAX_STORED_SIZE) {
-                fprintf(stderr, "%s:%d: new_size=%08zx > %08x\n",
-                    __func__, __LINE__, new_size, MAX_STORED_SIZE);
                 new_size = MAX_STORED_SIZE;
             }
             new_request = dxgk_all_ioctls[new_nr].ioc;
@@ -220,11 +218,12 @@ static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
             new_size = saved_requests[new_nr].size;
             memcpy(buf, saved_requests[new_nr].buffer, new_size);
         }
+        #endif
         //fprintf(stderr, "%s:%d: new_nr=%08x new_size=%08zx\n", __func__, __LINE__, new_nr, new_size);
         
         //TODO: for now, just replay already seen ioctls
         //now that we have corrupted shared memory
-        #if 0
+        #if 1
         size_t size_in_u4 = new_size / sizeof(uint32_t);
         if (!size_in_u4) {
             continue;
@@ -234,7 +233,6 @@ static void dxgk_fuzzer_mutate_ioctls(int arg, unsigned request, void *data)
         {
             size_t idx_corrupt = rand() % size_in_u4;
             if (idx_corrupt >= size_in_u4) {
-                fprintf(stderr, "HMM\n");
                 idx_corrupt = size_in_u4 - 1;
             }
             if (((uint32_t*)buf)[idx_corrupt]) {
@@ -337,6 +335,11 @@ static void dxgk_fuzzer_known_mem(int fd, unsigned request, void *data)
             add_mem_record_u64(arg->new_allocation_list, arg->new_allocation_list_size);
             add_mem_record_u64(arg->new_patch_pocation_list, arg->new_patch_pocation_list_size);
         }
+        case LX_DXESCAPE:
+        {
+            struct d3dkmt_escape *arg = data;
+            add_mem_record_u64(arg->priv_drv_data, arg->priv_drv_data_size);
+        }
         default:
             break;
     }
@@ -347,9 +350,8 @@ static int dxgk_fuzzer_ioctl(int fd, unsigned request, void *data)
 	unsigned type = _IOC_TYPE(request);
 	unsigned nr = _IOC_NR(request);
     unsigned size = _IOC_SIZE(request);
-	fprintf(stderr, "%s: name=%s type=%08x nr=%08x size=%08x\n",
-        __func__, dxgk_all_ioctls[nr].name, type, nr, size);
 
+    //fprintf(stderr, "%s: name=%s type=%08x nr=%08x size=%08x\n", __func__, dxgk_all_ioctls[nr].name, type, nr, size);
     if (nr <= LX_IO_MAX && size <= MAX_STORED_SIZE) {
         saved_requests[nr].request = request;
         saved_requests[nr].size = size;
@@ -358,17 +360,25 @@ static int dxgk_fuzzer_ioctl(int fd, unsigned request, void *data)
     
     //let the app initialize the rendering subsystem first
     static unsigned count = 0;
-    if (count) {
+    static unsigned num_iocs_to_skip = 0;
+    if (!count) {
         srand(time(NULL));
+        num_iocs_to_skip = 20 + rand() % 30;
+        fprintf(stderr, "%s: skipping first %u ioctls\n", __func__, num_iocs_to_skip);
     }
-    if (count++ < 100) {
-        return -1;
+    if (count++ < num_iocs_to_skip) {
+        //fprintf(stderr, "%s:%d calling real_ioctl\n", __func__, __LINE__);
+        return real_ioctl(fd, request, data);
     }
-    dxgk_fuzzer_known_mem(fd, request, data);
-    corrupt_some_mem();
-    //dxgk_fuzzer_mutate_ioctls(fd, request, data);
 
-	return -1;
+    if (rand() % 100 < 20) {
+        fprintf(stderr, "%s: fuzzing name=%s type=%08x nr=%08x size=%08x\n", __func__, dxgk_all_ioctls[nr].name, type, nr, size);
+        //dxgk_fuzzer_known_mem(fd, request, data);
+        //corrupt_some_mem();
+        dxgk_fuzzer_mutate_ioctls(fd, request, data);
+    }
+
+	return real_ioctl(fd, request, data);
 }
 
 static void *dxgk_mmap_hook(void *addr, size_t length, int prot, int flags,
