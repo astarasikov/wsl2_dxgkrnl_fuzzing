@@ -33,7 +33,7 @@ int ioctl(int fd, unsigned request, void *data)
 {
 	//fprintf(stderr, "%s: fd=%d request=%08x data=%p\n", __func__, fd, request, data);
     if (fd == g_dxg_fd) {
-        dxgk_fuzzer_ioctl(fd, request, data);
+        return dxgk_fuzzer_ioctl(fd, request, data);
     }
 	return real_ioctl(fd, request, data);
 }
